@@ -304,11 +304,12 @@ class Entity extends Eloquent implements EntityInterface
         });
 
         static::saved(static function (Entity $entity) {
-            $entity->timestamps = false;
             $parentIdChanged = $entity->isDirty($entity->getParentIdColumn());
-
+            
             if ($parentIdChanged || $entity->isDirty($entity->getPositionColumn())) {
+                $entity->timestamps = false;
                 $entity->reorderSiblings();
+                $entity->timestamps = true;
             }
 
             if ($entity->closure->ancestor === null) {
@@ -321,7 +322,6 @@ class Entity extends Eloquent implements EntityInterface
             if ($parentIdChanged) {
                 $entity->closure->moveNodeTo($entity->parent_id);
             }
-            $entity->timestamps = true;
         });
     }
 
