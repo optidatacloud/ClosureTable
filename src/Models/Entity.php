@@ -277,20 +277,6 @@ class Entity extends Eloquent implements EntityInterface
     {
         parent::boot();
 
-        static::saving(static function (Entity $entity) {
-            if ($entity->isDirty($entity->getPositionColumn())) {
-                $latest = static::getLatestPosition($entity);
-
-                if (!$entity->isMoved) {
-                    $latest--;
-                }
-
-                $entity->position = max(0, min($entity->position, $latest));
-            } elseif (!$entity->exists) {
-                $entity->position = static::getLatestPosition($entity);
-            }
-        });
-
         // When entity is created, the appropriate
         // data will be put into the closure table.
         static::created(static function (Entity $entity) {
@@ -305,12 +291,6 @@ class Entity extends Eloquent implements EntityInterface
 
         static::saved(static function (Entity $entity) {
             $parentIdChanged = $entity->isDirty($entity->getParentIdColumn());
-            
-            if ($parentIdChanged || $entity->isDirty($entity->getPositionColumn())) {
-                $entity->timestamps = false;
-                $entity->reorderSiblings();
-                $entity->timestamps = true;
-            }
 
             if ($entity->closure->ancestor === null) {
                 $primaryKey = $entity->getKey();
