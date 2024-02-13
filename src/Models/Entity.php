@@ -1,4 +1,5 @@
 <?php
+
 namespace Franzose\ClosureTable\Models;
 
 use Illuminate\Database\Eloquent\Builder;
@@ -276,6 +277,10 @@ class Entity extends Eloquent implements EntityInterface
     public static function boot()
     {
         parent::boot();
+
+        if (request()->hasHeader('X-Optiwork-Migration')) {
+            return;
+        }
 
         // When entity is created, the appropriate
         // data will be put into the closure table.
@@ -1495,7 +1500,7 @@ class Entity extends Eloquent implements EntityInterface
             ->where($position, '>=', $from);
 
         if ($to !== null) {
-           $query->where($position, '<=', $to);
+            $query->where($position, '<=', $to);
         }
 
         return $query;
