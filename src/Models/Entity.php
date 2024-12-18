@@ -2,13 +2,15 @@
 
 namespace Franzose\ClosureTable\Models;
 
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\Model as Eloquent;
 use Franzose\ClosureTable\Contracts\EntityInterface;
 use Franzose\ClosureTable\Extensions\Collection;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model as Eloquent;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Cache;
 use InvalidArgumentException;
+use Optidata\OptiCloud\OptiCloudService;
 
 /**
  * Basic entity class.
@@ -20,6 +22,7 @@ use InvalidArgumentException;
  * @property int position Alias for the current position attribute name
  * @property int parent_id Alias for the direct ancestor identifier attribute name
  * @property Collection children Child nodes loaded from the database
+ *
  * @method Builder ancestors()
  * @method Builder ancestorsOf($id)
  * @method Builder ancestorsWithSelf()
@@ -60,8 +63,6 @@ use InvalidArgumentException;
  * @method Builder nextSiblingsOf($id)
  * @method Builder siblingsRange(int $from, int $to = null)
  * @method Builder siblingsRangeOf($id, int $from, int $to = null)
- *
- * @package Franzose\ClosureTable
  */
 class Entity extends Eloquent implements EntityInterface
 {
@@ -111,8 +112,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Entity constructor.
-     *
-     * @param array $attributes
      */
     public function __construct(array $attributes = [])
     {
@@ -142,6 +141,7 @@ class Entity extends Eloquent implements EntityInterface
         $instance = parent::newFromBuilder($attributes);
         $instance->previousParentId = $instance->parent_id;
         $instance->previousPosition = $instance->position;
+
         return $instance;
     }
 
@@ -158,7 +158,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Sets new parent id and caches the old one.
      *
-     * @param int $value
+     * @param  int  $value
      */
     public function setParentIdAttribute($value)
     {
@@ -204,7 +204,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Sets new position and caches the old one.
      *
-     * @param int $value
+     * @param  int  $value
      */
     public function setPositionAttribute($value)
     {
@@ -251,6 +251,7 @@ class Entity extends Eloquent implements EntityInterface
      * Gets the short name of the "real depth" column.
      *
      * @return string
+     *
      * @deprecated since 6.0
      */
     public function getRealDepthColumn()
@@ -262,6 +263,7 @@ class Entity extends Eloquent implements EntityInterface
      * Gets the "children" relation index.
      *
      * @return string
+     *
      * @deprecated since 6.0
      */
     public function getChildrenRelationIndex()
@@ -269,45 +271,34 @@ class Entity extends Eloquent implements EntityInterface
         return static::CHILDREN_RELATION_NAME;
     }
 
-    /**
-     * The "booting" method of the model.
-     *
-     * @return void
-     */
-    public static function boot()
+    public static function getNextPositionOnQueue(): int
     {
-        parent::boot();
+        $nextPositionCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.next_on_queue.key');
 
-        if (request()->hasHeader('X-Optiwork-Migration')) {
-            return;
+        if (Cache::add($nextPositionCacheKey, 1)) {
+            return 0;
         }
 
-        // When entity is created, the appropriate
-        // data will be put into the closure table.
-        static::created(static function (Entity $entity) {
-            $entity->previousParentId = null;
-            $entity->previousPosition = null;
+        $nextPosition = Cache::increment($nextPositionCacheKey);
 
-            $descendant = $entity->getKey();
-            $ancestor = $entity->parent_id ?? $descendant;
+        return $nextPosition;
+    }
 
-            $entity->closure->insertNode($ancestor, $descendant);
+    public static function getToRunPositionOnQueue(): int
+    {
+        $toRunCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.to_run.key');
+
+        $toRunCacheValue = Cache::remember($toRunCacheKey, null, function () {
+            return 0; // If the cache doesn't exist, we'll create it initially with a 0 value.
         });
 
-        static::saved(static function (Entity $entity) {
-            $parentIdChanged = $entity->isDirty($entity->getParentIdColumn());
+        return $toRunCacheValue;
+    }
 
-            if ($entity->closure->ancestor === null) {
-                $primaryKey = $entity->getKey();
-                $entity->closure->ancestor = $primaryKey;
-                $entity->closure->descendant = $primaryKey;
-                $entity->closure->depth = 0;
-            }
-
-            if ($parentIdChanged) {
-                $entity->closure->moveNodeTo($entity->parent_id);
-            }
-        });
+    public static function incrementToRunPositionOnQueue(): void
+    {
+        $toRunCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.to_run.key');
+        Cache::increment($toRunCacheKey);
     }
 
     /**
@@ -333,7 +324,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves direct ancestor of a model.
      *
-     * @param array $columns
      * @return Entity|null
      */
     public function getParent(array $columns = ['*'])
@@ -354,8 +344,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for ancestors.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeAncestors(Builder $builder)
@@ -366,8 +354,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for ancestors of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -379,8 +366,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for ancestors including the current node.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeAncestorsWithSelf(Builder $builder)
@@ -391,8 +376,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for ancestors of the node with given ID including that node also.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -404,9 +388,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Builds base ancestors query.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param bool $withSelf
+     * @param  mixed  $id
+     * @param  bool  $withSelf
      *
      * @return Builder
      */
@@ -428,7 +411,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves all ancestors of a model.
      *
-     * @param array $columns
      * @return Collection
      */
     public function getAncestors(array $columns = ['*'])
@@ -439,8 +421,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves tree structured ancestors of a model.
      *
-     * @param array $columns
      * @return Collection
+     *
      * @deprecated since 6.0, use {@link Collection::toTree()} instead
      */
     public function getAncestorsTree(array $columns = ['*'])
@@ -451,11 +433,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves ancestors applying given conditions.
      *
-     * @param mixed $column
-     * @param mixed $operator
-     * @param mixed $value
-     * @param array $columns
+     * @param  mixed  $column
+     * @param  mixed  $operator
+     * @param  mixed  $value
+     *
      * @return Collection
+     *
      * @deprecated since 6.0, use {@link Entity::ancestors()} scope instead
      */
     public function getAncestorsWhere($column, $operator = null, $value = null, array $columns = ['*'])
@@ -486,8 +469,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for descendants.
      *
-     * @param Builder $builder
-     * @param bool $withSelf
+     * @param  bool  $withSelf
      *
      * @return Builder
      */
@@ -499,8 +481,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for descendants of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -512,8 +493,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for descendants including the current node.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeDescendantsWithSelf(Builder $builder)
@@ -524,8 +503,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for descendants including the current node of the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -537,9 +515,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Builds base descendants query.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param bool $withSelf
+     * @param  mixed  $id
+     * @param  bool  $withSelf
      *
      * @return Builder
      */
@@ -561,7 +538,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves all descendants of a model.
      *
-     * @param array $columns
      * @return Collection
      */
     public function getDescendants(array $columns = ['*'])
@@ -572,8 +548,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves tree structured descendants of a model.
      *
-     * @param array $columns
      * @return Collection
+     *
      * @deprecated since 6.0, use {@link Collection::toTree()} instead
      */
     public function getDescendantsTree(array $columns = ['*'])
@@ -584,11 +560,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves descendants applying given conditions.
      *
-     * @param mixed $column
-     * @param mixed $operator
-     * @param mixed $value
-     * @param array $columns
+     * @param  mixed  $column
+     * @param  mixed  $operator
+     * @param  mixed  $value
+     *
      * @return Collection
+     *
      * @deprecated since 6.0, use {@link Entity::descendants()} scope instead
      */
     public function getDescendantsWhere($column, $operator = null, $value = null, array $columns = ['*'])
@@ -629,8 +606,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves all children of a model.
      *
-     * @param array $columns
-     *
      * @return Collection
      */
     public function getChildren(array $columns = ['*'])
@@ -662,6 +637,7 @@ class Entity extends Eloquent implements EntityInterface
      * Indicates whether a model has children as a relation.
      *
      * @return bool
+     *
      * @deprecated from 6.0
      */
     public function hasChildrenRelation()
@@ -671,8 +647,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for child nodes.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -684,8 +658,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for child nodes of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -701,8 +674,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a child at the given position.
      *
-     * @param Builder $builder
-     * @param int $position
+     * @param  int  $position
      *
      * @return Builder
      */
@@ -716,9 +688,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a child at the given position of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param int $position
+     * @param  mixed  $id
+     * @param  int  $position
      *
      * @return Builder
      */
@@ -732,8 +703,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves a child with given position.
      *
-     * @param int $position
-     * @param array $columns
+     * @param  int  $position
+     *
      * @return Entity
      */
     public function getChildAt($position, array $columns = ['*'])
@@ -743,8 +714,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the first child node.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -756,8 +725,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the first child node of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -769,7 +737,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves the first child.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getFirstChild(array $columns = ['*'])
@@ -779,8 +746,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the last child node.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -792,8 +757,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the last child node of the node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -805,7 +769,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves the last child.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getLastChild(array $columns = ['*'])
@@ -816,9 +779,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder to child nodes in the range of the given positions.
      *
-     * @param Builder $builder
-     * @param int $from
-     * @param int|null $to
+     * @param  int  $from
+     * @param  int|null  $to
      *
      * @return Builder
      */
@@ -837,10 +799,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder to child nodes in the range of the given positions for the node of the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param int $from
-     * @param int|null $to
+     * @param  mixed  $id
+     * @param  int  $from
+     * @param  int|null  $to
      *
      * @return Builder
      */
@@ -859,9 +820,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves children within given positions range.
      *
-     * @param int $from
-     * @param int $to
-     * @param array $columns
+     * @param  int  $from
+     * @param  int  $to
+     *
      * @return Collection
      */
     public function getChildrenRange($from, $to = null, array $columns = ['*'])
@@ -872,9 +833,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Appends a child to the model.
      *
-     * @param EntityInterface $child
-     * @param int $position
-     * @param bool $returnChild
+     * @param  int  $position
+     * @param  bool  $returnChild
+     *
      * @return EntityInterface
      */
     public function addChild(EntityInterface $child, $position = null, $returnChild = false)
@@ -903,12 +864,13 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Appends a collection of children to the model.
      *
-     * @param Entity[] $children
-     * @param int $from
+     * @param  Entity[]  $children
+     * @param  int  $from
      *
-     * @return Entity
      * @throws InvalidArgumentException
      * @throws \Throwable
+     *
+     * @return Entity
      */
     public function addChildren(array $children, $from = null)
     {
@@ -929,7 +891,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Appends the given entity to the children relation.
      *
-     * @param Entity $entity
      * @internal
      */
     public function appendChild(Entity $entity)
@@ -943,7 +904,7 @@ class Entity extends Eloquent implements EntityInterface
     private function getChildrenRelation()
     {
         if (!$this->relationLoaded(static::CHILDREN_RELATION_NAME)) {
-            $this->setRelation(static::CHILDREN_RELATION_NAME, new Collection());
+            $this->setRelation(static::CHILDREN_RELATION_NAME, new Collection);
         }
 
         return $this->getRelation(static::CHILDREN_RELATION_NAME);
@@ -952,11 +913,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Removes a model's child with given position.
      *
-     * @param int $position
-     * @param bool $forceDelete
+     * @param  int  $position
+     * @param  bool  $forceDelete
+     *
+     * @throws \Throwable
      *
      * @return $this
-     * @throws \Throwable
      */
     public function removeChild($position = null, $forceDelete = false)
     {
@@ -967,7 +929,7 @@ class Entity extends Eloquent implements EntityInterface
         $child = $this->getChildAt($position, [
             $this->getKeyName(),
             $this->getParentIdColumn(),
-            $this->getPositionColumn()
+            $this->getPositionColumn(),
         ]);
 
         if ($child === null) {
@@ -988,13 +950,14 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Removes model's children within a range of positions.
      *
-     * @param int $from
-     * @param int $to
-     * @param bool $forceDelete
+     * @param  int  $from
+     * @param  int  $to
+     * @param  bool  $forceDelete
      *
-     * @return $this
      * @throws InvalidArgumentException
      * @throws \Throwable
+     *
+     * @return $this
      */
     public function removeChildren($from, $to = null, $forceDelete = false)
     {
@@ -1024,8 +987,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns sibling query builder.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeSibling(Builder $builder)
@@ -1036,8 +997,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for siblings of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1048,8 +1008,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns siblings query builder.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1063,8 +1021,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Return query builder for siblings of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1079,8 +1036,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Retrives all siblings of a model.
-     *
-     * @param array $columns
      *
      * @return Collection
      */
@@ -1112,8 +1067,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns neighbors query builder.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeNeighbors(Builder $builder)
@@ -1128,8 +1081,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the neighbors of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1145,8 +1097,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves neighbors (immediate previous and immediate next models) of a model.
      *
-     * @param array $columns
-     *
      * @return Collection
      */
     public function getNeighbors(array $columns = ['*'])
@@ -1157,8 +1107,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a sibling at the given position.
      *
-     * @param Builder $builder
-     * @param int $position
+     * @param  int  $position
      *
      * @return Builder
      */
@@ -1172,9 +1121,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a sibling at the given position of a node of the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param int $position
+     * @param  mixed  $id
+     * @param  int  $position
      *
      * @return Builder
      */
@@ -1188,8 +1136,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves a model's sibling with given position.
      *
-     * @param int $position
-     * @param array $columns
+     * @param  int  $position
+     *
      * @return Entity
      */
     public function getSiblingAt($position, array $columns = ['*'])
@@ -1199,8 +1147,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the first sibling.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1212,8 +1158,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the first sibling of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1225,7 +1170,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves the first model's sibling.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getFirstSibling(array $columns = ['*'])
@@ -1235,8 +1179,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the last sibling.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1248,8 +1190,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the last sibling of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1264,7 +1205,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves the last model's sibling.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getLastSibling(array $columns = ['*'])
@@ -1274,8 +1214,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the previous sibling.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1289,8 +1227,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the previous sibling of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1306,7 +1243,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves immediate previous sibling of a model.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getPrevSibling(array $columns = ['*'])
@@ -1316,8 +1252,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the previous siblings.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1331,8 +1265,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the previous siblings of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1347,8 +1280,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Retrieves all previous siblings of a model.
-     *
-     * @param array $columns
      *
      * @return Collection
      */
@@ -1380,8 +1311,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the next sibling.
      *
-     * @param Builder $builder
-     *
      * @return Builder
      */
     public function scopeNextSibling(Builder $builder)
@@ -1394,8 +1323,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the next sibling of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1411,7 +1339,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves immediate next sibling of a model.
      *
-     * @param array $columns
      * @return Entity
      */
     public function getNextSibling(array $columns = ['*'])
@@ -1421,8 +1348,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Returns query builder for the next siblings.
-     *
-     * @param Builder $builder
      *
      * @return Builder
      */
@@ -1436,8 +1361,7 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for the next siblings of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
+     * @param  mixed  $id
      *
      * @return Builder
      */
@@ -1452,8 +1376,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Retrieves all next siblings of a model.
-     *
-     * @param array $columns
      *
      * @return Collection
      */
@@ -1485,9 +1407,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a range of siblings.
      *
-     * @param Builder $builder
-     * @param int $from
-     * @param int|null $to
+     * @param  int  $from
+     * @param  int|null  $to
      *
      * @return Builder
      */
@@ -1509,10 +1430,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Returns query builder for a range of siblings of a node with the given ID.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param int $from
-     * @param int|null $to
+     * @param  mixed  $id
+     * @param  int  $from
+     * @param  int|null  $to
      *
      * @return Builder
      */
@@ -1534,9 +1454,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves siblings within given positions range.
      *
-     * @param int $from
-     * @param int $to
-     * @param array $columns
+     * @param  int  $from
+     * @param  int  $to
+     *
      * @return Collection
      */
     public function getSiblingsRange($from, $to = null, array $columns = ['*'])
@@ -1547,13 +1467,11 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Builds query for siblings.
      *
-     * @param Builder $builder
-     * @param mixed $id
-     * @param callable|null $positionCallback
+     * @param  mixed  $id
      *
      * @return Builder
      */
-    private function buildSiblingQuery(Builder $builder, $id, callable $positionCallback = null)
+    private function buildSiblingQuery(Builder $builder, $id, ?callable $positionCallback = null)
     {
         $parentIdColumn = $this->getParentIdColumn();
         $positionColumn = $this->getPositionColumn();
@@ -1585,9 +1503,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Appends a sibling within the current depth.
      *
-     * @param EntityInterface $sibling
-     * @param int|null $position
-     * @param bool $returnSibling
+     * @param  int|null  $position
+     * @param  bool  $returnSibling
+     *
      * @return EntityInterface
      */
     public function addSibling(EntityInterface $sibling, $position = null, $returnSibling = false)
@@ -1602,17 +1520,18 @@ class Entity extends Eloquent implements EntityInterface
             }
         }
 
-        return ($returnSibling === true ? $sibling : $this);
+        return $returnSibling === true ? $sibling : $this;
     }
 
     /**
      * Appends multiple siblings within the current depth.
      *
-     * @param Entity[] $siblings
-     * @param int|null $from
+     * @param  Entity[]  $siblings
+     * @param  int|null  $from
+     *
+     * @throws Throwable
      *
      * @return Entity
-     * @throws Throwable
      */
     public function addSiblings(array $siblings, $from = null)
     {
@@ -1635,8 +1554,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves root (with no ancestors) models.
      *
-     * @param array $columns
-     *
      * @return Collection
      */
     public static function getRoots(array $columns = ['*'])
@@ -1652,7 +1569,8 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Makes model a root with given position.
      *
-     * @param int $position
+     * @param  int  $position
+     *
      * @return $this
      */
     public function makeRoot($position)
@@ -1663,20 +1581,18 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Adds "parent id" column to columns list for proper tree querying.
      *
-     * @param array $columns
      * @return array
      */
     protected function prepareTreeQueryColumns(array $columns)
     {
-        return ($columns === ['*'] ? $columns : array_merge($columns, [$this->getParentIdColumn()]));
+        return $columns === ['*'] ? $columns : array_merge($columns, [$this->getParentIdColumn()]);
     }
 
     /**
      * Retrieves entire tree.
      *
-     * @param array $columns
-     *
      * @return Collection
+     *
      * @deprecated since 6.0
      */
     public static function getTree(array $columns = ['*'])
@@ -1697,12 +1613,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Retrieves tree by condition.
      *
-     * @param mixed $column
-     * @param mixed $operator
-     * @param mixed $value
-     * @param array $columns
+     * @param  mixed  $column
+     * @param  mixed  $operator
+     * @param  mixed  $value
      *
      * @return Collection
+     *
      * @deprecated since 6.0
      */
     public static function getTreeWhere($column, $operator = null, $value = null, array $columns = ['*'])
@@ -1717,12 +1633,10 @@ class Entity extends Eloquent implements EntityInterface
     }
 
     /**
-     * Retrieves tree with any conditions using QueryBuilder
-     *
-     * @param Builder $query
-     * @param array $columns
+     * Retrieves tree with any conditions using QueryBuilder.
      *
      * @return Collection
+     *
      * @deprecated since 6.0
      */
     public static function getTreeByQuery(Builder $query, array $columns = ['*'])
@@ -1732,19 +1646,18 @@ class Entity extends Eloquent implements EntityInterface
          */
         $instance = new static;
         $columns = $instance->prepareTreeQueryColumns($columns);
+
         return $query->get($columns)->toTree();
     }
 
     /**
      * Saves models from the given attributes array.
      *
-     * @param array $tree
-     * @param EntityInterface $parent
+     * @throws Throwable
      *
      * @return Collection
-     * @throws Throwable
      */
-    public static function createFromArray(array $tree, EntityInterface $parent = null)
+    public static function createFromArray(array $tree, ?EntityInterface $parent = null)
     {
         $entities = [];
 
@@ -1771,10 +1684,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Makes the model a child or a root with given position. Do not use moveTo to move a node within the same ancestor (call position = value and save instead).
      *
-     * @param int $position
-     * @param EntityInterface|int $ancestor
-     * @return Entity
+     * @param  int  $position
+     * @param  EntityInterface|int  $ancestor
+     *
      * @throws InvalidArgumentException
+     *
+     * @return Entity
      */
     public function moveTo($position, $ancestor = null)
     {
@@ -1800,8 +1715,6 @@ class Entity extends Eloquent implements EntityInterface
 
     /**
      * Gets the next sibling position after the last one.
-     *
-     * @param Entity $entity
      *
      * @return int
      */
@@ -1847,11 +1760,12 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Deletes a subtree from database.
      *
-     * @param bool $withSelf
-     * @param bool $forceDelete
+     * @param  bool  $withSelf
+     * @param  bool  $forceDelete
+     *
+     * @throws \Exception
      *
      * @return void
-     * @throws \Exception
      */
     public function deleteSubtree($withSelf = false, $forceDelete = false)
     {
@@ -1870,7 +1784,6 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Create a new Eloquent Collection instance.
      *
-     * @param  array $models
      * @return \Illuminate\Database\Eloquent\Collection
      */
     public function newCollection(array $models = [])
@@ -1881,10 +1794,9 @@ class Entity extends Eloquent implements EntityInterface
     /**
      * Executes queries within a transaction.
      *
-     * @param callable $callable
+     * @throws Throwable
      *
      * @return mixed
-     * @throws Throwable
      */
     private function transactional(callable $callable)
     {
