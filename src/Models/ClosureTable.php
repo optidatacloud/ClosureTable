@@ -1,8 +1,9 @@
 <?php
+
 namespace Franzose\ClosureTable\Models;
 
-use Illuminate\Database\Eloquent\Model as Eloquent;
 use Franzose\ClosureTable\Contracts\ClosureTableInterface;
+use Illuminate\Database\Eloquent\Model as Eloquent;
 
 /**
  * Basic ClosureTable model. Performs actions on the relationships table.
@@ -10,8 +11,6 @@ use Franzose\ClosureTable\Contracts\ClosureTableInterface;
  * @property mixed ancestor Alias for the ancestor attribute name
  * @property mixed descendant Alias for the descendant attribute name
  * @property int depth Alias for the depth attribute name
- *
- * @package Franzose\ClosureTable
  */
 class ClosureTable extends Eloquent implements ClosureTableInterface
 {
@@ -39,17 +38,19 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
     /**
      * Inserts new node into closure table.
      *
-     * @param mixed $ancestorId
-     * @param mixed $descendantId
-     * @return void
+     * @param  mixed  $ancestorId
+     * @param  mixed  $descendantId
      */
-    public function insertNode($ancestorId, $descendantId)
+    public function insertNode($ancestorId, $descendantId): void
     {
         $rows = $this->selectRowsToInsert($ancestorId, $descendantId);
 
-        if (count($rows) > 0) {
-            $this->insert($rows);
-        }
+        $columns = [
+            $this->getAncestorColumn(),
+            $this->getDescendantColumn(),
+            $this->getDepthColumn(),
+        ];
+        $this->insertUsing($columns, $rows);
     }
 
     private function selectRowsToInsert($ancestorId, $descendantId)
@@ -59,30 +60,24 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
         $descendant = $this->getDescendantColumn();
         $depth = $this->getDepthColumn();
 
-        $select = "
-            SELECT tbl.{$ancestor} AS {$ancestor}, ? AS {$descendant}, tbl.{$depth}+1 AS {$depth}
-            FROM {$table} AS tbl
-            WHERE tbl.{$descendant} = ?
-            UNION ALL
-            SELECT ? AS {$ancestor}, ? AS {$descendant}, 0 AS {$depth}
-        ";
+        $teste = $this->selectRaw("tbl.$ancestor AS $ancestor, ?::bigint AS $descendant, tbl.$depth+1 AS $depth", [$descendantId])
+            ->from($table, 'tbl')
+            ->whereRaw("tbl.$descendant = ?", [$ancestorId])
+            ->unionAll(function ($query) use ($ancestor, $descendant, $depth, $descendantId) {
+                $query->selectRaw("?::bigint AS $ancestor, ?::bigint AS $descendant, 0 AS $depth", [
+                    $descendantId,
+                    $descendantId,
+                ]);
+            });
 
-        $rows = $this->getConnection()->select($select, [
-            $descendantId,
-            $ancestorId,
-            $descendantId,
-            $descendantId
-        ]);
-
-        return array_map(static function ($row) {
-            return (array) $row;
-        }, $rows);
+        return $teste;
     }
 
     /**
      * Make a node a descendant of another ancestor or makes it a root node.
      *
-     * @param mixed $ancestorId
+     * @param  mixed  $ancestorId
+     *
      * @return void
      */
     public function moveNodeTo($ancestorId = null)
@@ -106,19 +101,14 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
             return;
         }
 
-        $query = "
-            INSERT INTO {$table} ({$ancestor}, {$descendant}, {$depth})
-            SELECT supertbl.{$ancestor}, subtbl.{$descendant}, supertbl.{$depth}+subtbl.{$depth}+1
-            FROM {$table} as supertbl
-            CROSS JOIN {$table} as subtbl
-            WHERE supertbl.{$descendant} = ?
-            AND subtbl.{$ancestor} = ?
-        ";
+        $supertbl = $this->newQuery()
+            ->selectRaw("supertbl.{$ancestor}, subtbl.{$descendant}, supertbl.{$depth} + subtbl.{$depth} + 1")
+            ->from("{$table} as supertbl")
+            ->crossJoin("{$table} as subtbl")
+            ->where("supertbl.{$descendant}", $ancestorId)
+            ->where("subtbl.{$ancestor}", $this->descendant);
 
-        $this->getConnection()->statement($query, [
-            $ancestorId,
-            $this->descendant
-        ]);
+        $this->insertUsing([$ancestor, $descendant, $depth], $supertbl);
     }
 
     /**
@@ -132,28 +122,18 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
         $ancestorColumn = $this->getAncestorColumn();
         $descendantColumn = $this->getDescendantColumn();
 
-        $query = "
-            DELETE FROM {$table}
-            WHERE {$descendantColumn} IN (
-              SELECT d FROM (
-                SELECT {$descendantColumn} AS d FROM {$table}
-                WHERE {$ancestorColumn} = ?
-              ) AS dct
-            )
-            AND {$ancestorColumn} IN (
-              SELECT a FROM (
-                SELECT {$ancestorColumn} AS a FROM {$table}
-                WHERE {$descendantColumn} = ?
-                AND {$ancestorColumn} <> ?
-              ) AS ct
-            )
-        ";
+        $descendants = $this->select($descendantColumn)
+            ->from($table)
+            ->where($ancestorColumn, $this->descendant);
 
-        $this->getConnection()->delete($query, [
-            $this->descendant,
-            $this->descendant,
-            $this->descendant
-        ]);
+        $ancestors = $this->select($ancestorColumn)
+            ->from($table)
+            ->where($descendantColumn, $this->descendant)
+            ->where($ancestorColumn, '<>', $this->descendant);
+
+        $this->whereIn($descendantColumn, $descendants)
+            ->whereIn($ancestorColumn, $ancestors)
+            ->delete();
     }
 
     /**
@@ -179,7 +159,7 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
     /**
      * Set new ancestor id.
      *
-     * @param $value
+     * @param  mixed  $value
      */
     public function setAncestorAttribute($value)
     {
@@ -219,7 +199,7 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
     /**
      * Set new descendant id.
      *
-     * @param $value
+     * @param  mixed  $value
      */
     public function setDescendantAttribute($value)
     {
@@ -259,7 +239,7 @@ class ClosureTable extends Eloquent implements ClosureTableInterface
     /**
      * Sets new depth.
      *
-     * @param $value
+     * @param  mixed  $value
      */
     public function setDepthAttribute($value)
     {
