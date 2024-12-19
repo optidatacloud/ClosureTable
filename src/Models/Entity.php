@@ -8,9 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model as Eloquent;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Support\Facades\Cache;
 use InvalidArgumentException;
-use Optidata\OptiCloud\OptiCloudService;
 
 /**
  * Basic entity class.
@@ -269,36 +267,6 @@ class Entity extends Eloquent implements EntityInterface
     public function getChildrenRelationIndex()
     {
         return static::CHILDREN_RELATION_NAME;
-    }
-
-    public static function getNextPositionOnQueue(): int
-    {
-        $nextPositionCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.next_on_queue.key');
-
-        if (Cache::add($nextPositionCacheKey, 1)) {
-            return 0;
-        }
-
-        $nextPosition = Cache::increment($nextPositionCacheKey);
-
-        return $nextPosition;
-    }
-
-    public static function getToRunPositionOnQueue(): int
-    {
-        $toRunCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.to_run.key');
-
-        $toRunCacheValue = Cache::remember($toRunCacheKey, null, function () {
-            return 0; // If the cache doesn't exist, we'll create it initially with a 0 value.
-        });
-
-        return $toRunCacheValue;
-    }
-
-    public static function incrementToRunPositionOnQueue(): void
-    {
-        $toRunCacheKey = 'tenant:' . app(OptiCloudService::class)->tenant()->getTenantId() . ':' . config('optiwork-drive.closure_table.cache.to_run.key');
-        Cache::increment($toRunCacheKey);
     }
 
     /**
